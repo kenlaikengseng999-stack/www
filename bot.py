@@ -27,7 +27,7 @@ HEADERS = {
 }
 BASE_URL = "https://9y.bfage.com/news/detail/"
 DEFAULT_START_ID = 3810
-CHECK_INTERVAL_MINUTES = 1
+CHECK_INTERVAL_MINUTES = 5
 
 # MongoDB 設定
 DB_NAME = "news_bot"
