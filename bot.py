@@ -18,7 +18,7 @@ HEADERS = {
 
 # ⚙️ 設定區
 TARGET_CHANNEL_ID = 123456789012345678  # ⚠️ 請替換為接收新聞的 Discord 頻道 ID
-DEFAULT_START_ID = 3810                # 若資料庫完全無紀錄時的預設起始 ID
+DEFAULT_START_ID = 3800                # 若資料庫完全無紀錄時的預設起始 ID
 CHECK_INTERVAL_MINUTES = 5             # 自動探測間隔（分鐘）
 
 # --- MongoDB 雲端資料庫邏輯 ---
