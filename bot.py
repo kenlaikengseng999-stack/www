@@ -9,7 +9,24 @@ import discord
 from discord.ext import tasks, commands
 from pymongo import MongoClient
 from aiohttp import web
+import os
+from flask import Flask
+from threading import Thread
 
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot is alive!"
+
+def run():
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
+
+# 在 Bot 啟動前呼叫 keep_alive()
 # ==========================================
 # 1. 讀取環境變數 (Environment Variables)
 # ==========================================
