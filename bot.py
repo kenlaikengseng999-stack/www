@@ -139,7 +139,16 @@ async def fetch_and_parse_news(session, news_id):
 
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+
+class NewsBot(commands.Bot):
+    async def setup_hook(self):
+        # 在 Bot 啟動時同步啟動 Web 伺服器與背景任務
+        await start_web_server()
+        if not auto_check_news.is_running():
+            auto_check_news.start()
+            print(f"⏰ 自動探測已啟動（每 {CHECK_INTERVAL_MINUTES} 分鐘檢查一次）")
+
+bot = NewsBot(command_prefix="!", intents=intents)
 
 # --- 每 5 分鐘自動執行的 Task ---
 
@@ -187,18 +196,10 @@ async def before_auto_check():
 
 @bot.event
 async def on_ready():
-    print(f"🤖 Bot 已上線：{bot.user.name}")
+    print(f"🤖 Bot 已成功上線！登入身分：{bot.user.name}")
     print(f"📌 目前起始探測 ID 為：{last_checked_id}")
-    
-    # 啟動 Web 伺服器供 Render 檢測
-    await start_web_server()
-    
-    if not auto_check_news.is_running():
-        auto_check_news.start()
-        print(f"⏰ 自動探測已啟動（每 {CHECK_INTERVAL_MINUTES} 分鐘檢查一次）")
 
 TOKEN = os.environ.get("DISCORD_TOKEN")
-
 if not TOKEN:
     raise ValueError("❌ 未找不到 DISCORD_TOKEN 環境變數，請在 Render 設定！")
 
