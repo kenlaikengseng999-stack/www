@@ -98,7 +98,7 @@ async def start_web_server():
 # 5. 網頁爬蟲函式 (Web Scraper)
 # ==========================================
 async def fetch_and_parse_news(session: aiohttp.ClientSession, news_id: int):
-    """發送 HTTP 請求解析文章"""
+    """發送 HTTP 請求解析文章（含嚴格防空頁機制）"""
     target_url = f"{BASE_URL}{news_id}/"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -106,16 +106,23 @@ async def fetch_and_parse_news(session: aiohttp.ClientSession, news_id: int):
 
     try:
         async with session.get(target_url, headers=headers, timeout=10) as response:
+            # 1. 狀態碼非 200 直接過濾
             if response.status != 200:
                 return None
             
             html = await response.text()
             soup = BeautifulSoup(html, "html.parser")
 
-            # 提取標題與時間 (依實際網頁結構微調)
+            # 2. 抓取標題
             title_tag = soup.select_one("h1, .news-title, .title")
-            title = title_tag.get_text(strip=True) if title_tag else "未命名文章"
+            title = title_tag.get_text(strip=True) if title_tag else ""
 
+            # 🛡️ 關鍵防護：過濾無效標題/空頁面
+            invalid_keywords = ["未命名文章", "404", "不存在", "找不到", "Error", "頁面未找到"]
+            if not title or any(keyword in title for keyword in invalid_keywords):
+                return None
+
+            # 3. 抓取發布日期
             date_tag = soup.select_one(".date, .time, .news-date")
             pub_date = date_tag.get_text(strip=True) if date_tag else datetime.now().strftime("%Y-%m-%d")
 
