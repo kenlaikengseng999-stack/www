@@ -197,4 +197,4 @@ async def on_ready():
         auto_check_news.start()
         print(f"⏰ 自動探測已啟動（每 {CHECK_INTERVAL_MINUTES} 分鐘檢查一次）")
 
-bot.run("YOUR_DISCORD_BOT_TOKEN")
+bot.run("MTQ3ODMyNDg2NzAzMTEwOTYzMg.GS4xy8.1_Wg77mNuDykSBvuJwGPO289K28JHW5R4lKqd0")
