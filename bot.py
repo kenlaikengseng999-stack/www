@@ -1,5 +1,6 @@
 import discord
 from discord.ext import commands, tasks
+from aiohttp import web
 import aiohttp
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urlunparse
@@ -19,6 +20,27 @@ TARGET_CHANNEL_ID = 1550398644933361685  # ⚠️ 請替換為接收新聞的 Di
 START_ID = 3810                         # 初始探測的新聞 ID
 CHECK_INTERVAL_MINUTES = 5             # 自動探測間隔（分鐘）
 DATA_FILE = "last_id.txt"               # 紀錄最新 ID 的檔案名稱
+
+# --- Web Server（給 Render 免費檢測用） ---
+
+async def handle_ping(request):
+    """給 Render 健康檢查用的 Ping 接口，回應 200 OK"""
+    return web.Response(text="Bot is alive!", status=200)
+
+async def start_web_server():
+    """啟動非同步 Web 伺服器，自動綁定 Render 的 PORT 變數"""
+    app = web.Application()
+    app.router.add_get('/', handle_ping)
+    app.router.add_get('/health', handle_ping)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
+    # 讀取 Render 環境變數中的 PORT，預設為 8080
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"🌐 Web Server 已在通訊埠 {port} 啟動（專供 Render 保活）")
 
 # --- ID 讀寫紀錄機制 ---
 
@@ -140,9 +162,8 @@ async def auto_check_news():
 
             if result:
                 valid_url, title, pub_date = result
-                consecutive_failures = 0  # 重置失敗計數
+                consecutive_failures = 0
                 
-                # 只有當「成功抓到新聞」時才會發送 Discord 訊息
                 embed = discord.Embed(
                     title=f"📰 {title}",
                     url=valid_url,
@@ -153,11 +174,9 @@ async def auto_check_news():
 
                 await channel.send(embed=embed)
 
-                # 更新最後找到的 ID 並儲存至文字檔
                 last_checked_id = curr_id + 1
                 save_last_id(last_checked_id)
             else:
-                # 沒找到新聞時：完全不發訊息，僅在後台默默紀錄失敗次數
                 consecutive_failures += 1
 
             curr_id += 1
@@ -170,8 +189,12 @@ async def before_auto_check():
 async def on_ready():
     print(f"🤖 Bot 已上線：{bot.user.name}")
     print(f"📌 目前起始探測 ID 為：{last_checked_id}")
+    
+    # 啟動 Web 伺服器供 Render 檢測
+    await start_web_server()
+    
     if not auto_check_news.is_running():
         auto_check_news.start()
-        print(f"⏰ 自動探測已啟動（每 {CHECK_INTERVAL_MINUTES} 分鐘檢查一次，無新文章時保持靜默）")
+        print(f"⏰ 自動探測已啟動（每 {CHECK_INTERVAL_MINUTES} 分鐘檢查一次）")
 
 bot.run("YOUR_DISCORD_BOT_TOKEN")
