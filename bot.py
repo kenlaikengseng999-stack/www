@@ -18,7 +18,7 @@ HEADERS = {
 # ⚙️ 設定區
 TARGET_CHANNEL_ID = 1550398644933361685  # ⚠️ 請替換為接收新聞的 Discord 頻道 ID
 START_ID = 3810                         # 初始探測的新聞 ID
-CHECK_INTERVAL_MINUTES = 5             # 自動探測間隔（分鐘）
+CHECK_INTERVAL_MINUTES = 1             # 自動探測間隔（分鐘）
 DATA_FILE = "last_id.txt"               # 紀錄最新 ID 的檔案名稱
 
 # --- Web Server（給 Render 免費檢測用） ---
@@ -33,11 +33,9 @@ async def start_web_server():
     app.router.add_get('/', handle_ping)
     app.router.add_get('/health', handle_ping)
     
+    port = int(os.environ.get("PORT", 8080))
     runner = web.AppRunner(app)
     await runner.setup()
-    
-    # 讀取 Render 環境變數中的 PORT，預設為 8080
-    port = int(os.environ.get("PORT", 8080))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     print(f"🌐 Web Server 已在通訊埠 {port} 啟動（專供 Render 保活）")
@@ -142,7 +140,6 @@ intents.message_content = True
 
 class NewsBot(commands.Bot):
     async def setup_hook(self):
-        # 在 Bot 啟動時同步啟動 Web 伺服器與背景任務
         await start_web_server()
         if not auto_check_news.is_running():
             auto_check_news.start()
@@ -150,7 +147,7 @@ class NewsBot(commands.Bot):
 
 bot = NewsBot(command_prefix="!", intents=intents)
 
-# --- 每 5 分鐘自動執行的 Task ---
+# --- 每 1 分鐘自動執行的 Task ---
 
 @tasks.loop(minutes=CHECK_INTERVAL_MINUTES)
 async def auto_check_news():
@@ -164,6 +161,7 @@ async def auto_check_news():
     max_failures = 5
     consecutive_failures = 0
     curr_id = last_checked_id
+    found_new_article = False  # 紀錄這次探測是否有發現新文章
 
     async with aiohttp.ClientSession() as session:
         while consecutive_failures < max_failures:
@@ -172,6 +170,7 @@ async def auto_check_news():
             if result:
                 valid_url, title, pub_date = result
                 consecutive_failures = 0
+                found_new_article = True
                 
                 embed = discord.Embed(
                     title=f"📰 {title}",
@@ -190,6 +189,10 @@ async def auto_check_news():
 
             curr_id += 1
 
+    # 如果探測完畢且完全沒抓到新文章，印出提示
+    if not found_new_article:
+        print(f"🔍 檢查完成（ID {last_checked_id}），暫時沒有找到新的網站文章")
+
 @auto_check_news.before_loop
 async def before_auto_check():
     await bot.wait_until_ready()
@@ -201,6 +204,6 @@ async def on_ready():
 
 TOKEN = os.environ.get("DISCORD_TOKEN")
 if not TOKEN:
-    raise ValueError("❌ 未找不到 DISCORD_TOKEN 環境變數，請在 Render 設定！")
+    raise ValueError("❌ 未找到 DISCORD_TOKEN 環境變數，請在 Render 設定！")
 
 bot.run(TOKEN)
