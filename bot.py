@@ -197,4 +197,9 @@ async def on_ready():
         auto_check_news.start()
         print(f"⏰ 自動探測已啟動（每 {CHECK_INTERVAL_MINUTES} 分鐘檢查一次）")
 
-bot.run("MTQ3ODMyNDg2NzAzMTEwOTYzMg.GS4xy8.1_Wg77mNuDykSBvuJwGPO289K28JHW5R4lKqd0")
+TOKEN = os.environ.get("DISCORD_TOKEN")
+
+if not TOKEN:
+    raise ValueError("❌ 未找不到 DISCORD_TOKEN 環境變數，請在 Render 設定！")
+
+bot.run(TOKEN)
