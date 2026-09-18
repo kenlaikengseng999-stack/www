@@ -6,6 +6,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urlunparse
 import re
 import os
+from pymongo import MongoClient
 
 HEADERS = {
     "User-Agent": (
@@ -16,56 +17,75 @@ HEADERS = {
 }
 
 # ⚙️ 設定區
-TARGET_CHANNEL_ID = 1550398644933361685  # ⚠️ 請替換為接收新聞的 Discord 頻道 ID
-START_ID = 3810                         # 初始探測的新聞 ID
-CHECK_INTERVAL_MINUTES = 1             # 自動探測間隔（分鐘）
-DATA_FILE = "last_id.txt"               # 紀錄最新 ID 的檔案名稱
+TARGET_CHANNEL_ID = 123456789012345678  # ⚠️ 請替換為接收新聞的 Discord 頻道 ID
+DEFAULT_START_ID = 3810                # 若資料庫完全無紀錄時的預設起始 ID
+CHECK_INTERVAL_MINUTES = 5             # 自動探測間隔（分鐘）
 
-# --- Web Server（給 Render 免費檢測用） ---
+# --- MongoDB 雲端資料庫邏輯 ---
+
+MONGO_URI = os.environ.get("MONGO_URI")
+
+def get_db_collection():
+    if MONGO_URI:
+        try:
+            client = MongoClient(MONGO_URI)
+            db = client["news_bot_db"]
+            return db["bot_state"]
+        except Exception as e:
+            print(f"⚠️ MongoDB 連線失敗: {e}")
+    return None
+
+def load_last_id():
+    """從雲端資料庫讀取最新新聞 ID"""
+    collection = get_db_collection()
+    if collection is not None:
+        try:
+            doc = collection.find_one({"_id": "last_news_id"})
+            if doc and "val" in doc:
+                print(f"☁️ 成功從雲端資料庫讀取上次紀錄 ID：{doc['val']}")
+                return doc["val"]
+        except Exception as e:
+            print(f"⚠️ 讀取雲端 ID 失敗: {e}")
+    print(f"📌 使用預設起始 ID：{DEFAULT_START_ID}")
+    return DEFAULT_START_ID
+
+def save_last_id(news_id):
+    """將最新 ID 自動同步寫入雲端資料庫"""
+    collection = get_db_collection()
+    if collection is not None:
+        try:
+            collection.update_one(
+                {"_id": "last_news_id"},
+                {"$set": {"val": news_id}},
+                upsert=True
+            )
+            print(f"☁️ 已將最新 ID ({news_id}) 自動同步儲存至雲端資料庫！")
+        except Exception as e:
+            print(f"⚠️ 儲存至雲端失敗: {e}")
+
+last_checked_id = load_last_id()
+
+# --- Web Server（給 Render 保活用） ---
 
 async def handle_ping(request):
-    """給 Render 健康檢查用的 Ping 接口，回應 200 OK"""
     return web.Response(text="Bot is alive!", status=200)
 
 async def start_web_server():
-    """啟動非同步 Web 伺服器，自動綁定 Render 的 PORT 變數"""
     app = web.Application()
     app.router.add_get('/', handle_ping)
     app.router.add_get('/health', handle_ping)
     
-    port = int(os.environ.get("PORT", 8080))
     runner = web.AppRunner(app)
     await runner.setup()
+    
+    port = int(os.environ.get("PORT", 8080))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print(f"🌐 Web Server 已在通訊埠 {port} 啟動（專供 Render 保活）")
-
-# --- ID 讀寫紀錄機制 ---
-
-def load_last_id():
-    """讀取上一次抓取到的最新 ID"""
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                return int(f.read().strip())
-        except Exception:
-            pass
-    return START_ID
-
-def save_last_id(news_id):
-    """儲存最新 ID 至檔案"""
-    try:
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            f.write(str(news_id))
-    except Exception as e:
-        print(f"紀錄 ID 失敗: {e}")
-
-last_checked_id = load_last_id()
+    print(f"🌐 Web Server 已在通訊埠 {port} 啟動")
 
 # --- 網址處理與解析邏輯 ---
 
 def fix_and_normalize_url(url):
-    """補全協定標頭並正規化網址"""
     if url.startswith("//"):
         url = "http:" + url
     elif not url.startswith("http"):
@@ -87,7 +107,6 @@ def fix_and_normalize_url(url):
     ))
 
 def extract_news_detail_info(soup, text):
-    """【NEWS 內頁專用】依據 DOM 結構定位標題與日期 (YYYY-MM-DD)"""
     title = "無標題頁面"
     pub_date = "日期未標明"
 
@@ -119,7 +138,6 @@ def extract_news_detail_info(soup, text):
     return title, pub_date
 
 async def fetch_and_parse_news(session, news_id):
-    """非同步抓取特定 ID 的新聞"""
     target_url = f"https://9y.bfage.com/news/detail/{news_id}/"
     try:
         async with session.get(target_url, headers=HEADERS, timeout=4, allow_redirects=False) as res:
@@ -147,7 +165,7 @@ class NewsBot(commands.Bot):
 
 bot = NewsBot(command_prefix="!", intents=intents)
 
-# --- 每 1 分鐘自動執行的 Task ---
+# --- 每 5 分鐘自動執行的 Task ---
 
 @tasks.loop(minutes=CHECK_INTERVAL_MINUTES)
 async def auto_check_news():
@@ -161,7 +179,6 @@ async def auto_check_news():
     max_failures = 5
     consecutive_failures = 0
     curr_id = last_checked_id
-    found_new_article = False  # 紀錄這次探測是否有發現新文章
 
     async with aiohttp.ClientSession() as session:
         while consecutive_failures < max_failures:
@@ -170,7 +187,6 @@ async def auto_check_news():
             if result:
                 valid_url, title, pub_date = result
                 consecutive_failures = 0
-                found_new_article = True
                 
                 embed = discord.Embed(
                     title=f"📰 {title}",
@@ -188,10 +204,6 @@ async def auto_check_news():
                 consecutive_failures += 1
 
             curr_id += 1
-
-    # 如果探測完畢且完全沒抓到新文章，印出提示
-    if not found_new_article:
-        print(f"🔍 檢查完成（ID {last_checked_id}），暫時沒有找到新的網站文章")
 
 @auto_check_news.before_loop
 async def before_auto_check():
