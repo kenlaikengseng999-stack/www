@@ -159,7 +159,16 @@ async def fetch_and_parse_news(session: aiohttp.ClientSession, news_id: int):
     """發送 HTTP 請求解析文章，若頁面不存在或無標題則回傳 None"""
     target_url = f"{BASE_URL}{news_id}/"
     try:
-        async with session.get(target_url, headers=HEADERS, timeout=5, allow_redirects=False) as res:
+        # 🛡️ 每次請求前加入微小的隨機延遲，避免過於頻繁觸發 Cloudflare 頻率限制
+        await asyncio.sleep(1.5)
+
+        async with session.get(target_url, headers=HEADERS, timeout=10, allow_redirects=False) as res:
+            # 如果不幸觸發 429，讓程序暫停更長時間並回傳 None
+            if res.status == 429:
+                print(f"⚠️ 觸發 Cloudflare 限流 (429 Too Many Requests)，暫停 30 秒...")
+                await asyncio.sleep(30)
+                return None
+
             if res.status == 200:
                 html = await res.text(encoding="utf-8")
                 soup = BeautifulSoup(html, "html.parser")
@@ -171,7 +180,8 @@ async def fetch_and_parse_news(session: aiohttp.ClientSession, news_id: int):
                     return None
                     
                 return valid_url, title, pub_date
-    except Exception:
+    except Exception as e:
+        # 可以印出錯誤以便除錯（例如連線逾時）
         pass
     return None
 
