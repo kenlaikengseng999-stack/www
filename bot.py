@@ -9,10 +9,10 @@ import discord
 from discord.ext import tasks, commands
 from pymongo import MongoClient
 from aiohttp import web
-import os
 from flask import Flask
 from threading import Thread
 
+# Flask 保活設定 (保留你原本的 Keep Alive)
 app = Flask('')
 
 @app.route('/')
@@ -26,15 +26,13 @@ def keep_alive():
     t = Thread(target=run)
     t.start()
 
-# 在 Bot 啟動前呼叫 keep_alive()
 # ==========================================
-# 1. 讀取環境變數 (Environment Variables)
+# 1. 讀取環境變數與基本設定
 # ==========================================
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 TARGET_CHANNEL_ID = int(os.getenv("TARGET_CHANNEL_ID", "0"))
 MONGO_URI = os.getenv("MONGO_URI")
 
-# 網站與爬蟲設定
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -42,8 +40,8 @@ HEADERS = {
         "Chrome/120.0.0.0 Safari/537.36"
     )
 }
-BASE_URL = "https://9y.bfage.com/news/detail/"
-DEFAULT_START_ID = 3810
+HOME_URL = "https://9y.bfage.com/home/"
+BASE_URL = "https://9y.bfage.com"
 CHECK_INTERVAL_MINUTES = 5
 
 # MongoDB 設定
@@ -51,7 +49,7 @@ DB_NAME = "news_bot"
 COLLECTION_NAME = "settings"
 
 # ==========================================
-# 2. 初始化 MongoDB & 連線 Ping 測試
+# 2. 初始化 MongoDB 連線
 # ==========================================
 if not MONGO_URI:
     print("⚠️ 警告: 未設定 MONGO_URI 環境變數！")
@@ -67,126 +65,115 @@ except Exception as e:
     print(f"❌ MongoDB 連線失敗，請檢查 MONGO_URI: {e}")
 
 # ==========================================
-# 3. 資料庫讀寫函式 (Database Helpers)
+# 3. 資料庫讀寫函式 (改為記錄已發送過的最高 News ID 或集合)
 # ==========================================
-def load_last_id() -> int:
-    """從 MongoDB 讀取上次檢查的最後新聞 ID"""
+def load_last_seen_id() -> int:
+    """從 MongoDB 讀取上次已發送的最高新聞 ID"""
     try:
-        doc = collection.find_one({"_id": "last_checked_id"})
+        doc = collection.find_one({"_id": "latest_news_id"})
         if doc and "val" in doc:
-            print(f"📥 從 MongoDB 讀取進度 ID: {doc['val']}")
+            print(f"📥 從 MongoDB 讀取最新已發送的 ID: {doc['val']}")
             return int(doc["val"])
     except Exception as e:
         print(f"⚠️ 讀取 MongoDB 發生異常: {e}")
-    print(f"ℹ️ 使用預設起始 ID: {DEFAULT_START_ID}")
-    return DEFAULT_START_ID
+    # 預設從你之前卡住的 ID 開始防護
+    return 3840
 
-def save_last_id(last_id: int):
+def save_last_seen_id(news_id: int):
     """寫入最新的新聞 ID 到 MongoDB"""
     try:
         collection.update_one(
-            {"_id": "last_checked_id"},
-            {"$set": {"val": last_id, "updated_at": datetime.utcnow()}},
+            {"_id": "latest_news_id"},
+            {"$set": {"val": news_id, "updated_at": datetime.utcnow()}},
             upsert=True
         )
-        print(f"💾 進度 ID {last_id} 已儲存至 MongoDB")
+        print(f"💾 最新新聞 ID {news_id} 已儲存至 MongoDB")
     except Exception as e:
         print(f"❌ 寫入 MongoDB 失敗: {e}")
 
-# 全域進度變數
-last_checked_id = load_last_id()
+last_seen_id = load_last_seen_id()
 
 # ==========================================
-# 4. 網址正規化與內頁解析邏輯 (精準對接 9y.bfage)
+# 4. 網址正規化與首頁解析邏輯
 # ==========================================
 def fix_and_normalize_url(url):
-    """補全協定標頭並正規化網址"""
     if url.startswith("//"):
         url = "http:" + url
     elif not url.startswith("http"):
         url = "http://" + url
-
     parsed = urlparse(url)
     clean_path = re.sub(r'/index\.(html?|php)$', '/', parsed.path, flags=re.IGNORECASE)
-    
     if not clean_path.endswith('/') and not re.search(r'\.[a-zA-Z0-9]+$', clean_path):
         clean_path += '/'
+    return urlunparse((parsed.scheme, parsed.netloc, clean_path, parsed.params, parsed.query, parsed.fragment))
 
-    return urlunparse((
-        parsed.scheme,
-        parsed.netloc,
-        clean_path,
-        parsed.params,
-        parsed.query,
-        parsed.fragment
-    ))
+def extract_id_from_url(url):
+    """從新聞網址中萃取出數字 ID (例如 /news/detail/7710 -> 7710)"""
+    match = re.search(r'/news/detail/(\d+)', url)
+    if match:
+        return int(match.group(1))
+    return 0
 
-def extract_news_detail_info(soup, text):
-    """【NEWS 內頁專用】依據 DOM 結構精準定位標題與日期 (YYYY-MM-DD)"""
-    title = "無標題頁面"
-    pub_date = "日期未標明"
-
-    # 1. 抓取新聞精準日期
-    date_match = re.search(r'(\d{4}[-/]\d{1,2}[-/]\d{1,2})', text)
-    if date_match:
-        d_str = date_match.group(1).replace('/', '-')
-        parts = d_str.split('-')
-        pub_date = f"{parts[0]}-{int(parts[1]):02d}-{int(parts[2]):02d}"
-
-    # 2. 定位 DOM 結構中的標題
-    share_div = soup.find("div", class_="newsContShare")
-    if share_div:
-        prev_a = share_div.find_previous("a")
-        if prev_a and prev_a.get_text(strip=True):
-            title = prev_a.get_text(strip=True)
-
-    if title == "無標題頁面":
-        tit_block = soup.find(class_=re.compile(r'modTit|newsContModTit'))
-        if tit_block:
-            a_tag = tit_block.find("a")
-            if a_tag and a_tag.get_text(strip=True):
-                title = a_tag.get_text(strip=True)
-            elif tit_block.get_text(strip=True):
-                title = tit_block.get_text(strip=True)
-
-    if title == "無標題頁面":
-        if soup.title and soup.title.string:
-            title = re.sub(r'[-_\|].*$', '', soup.title.string).strip() or "官方頁面"
-
-    return title, pub_date
-
-async def fetch_and_parse_news(session: aiohttp.ClientSession, news_id: int):
-    """發送 HTTP 請求解析文章，若頁面不存在或無標題則回傳 None"""
-    target_url = f"{BASE_URL}{news_id}/"
+async def fetch_home_news(session: aiohttp.ClientSession):
+    """直接爬取首頁的公告清單，取得所有最新文章的標題、日期與連結"""
+    news_items = []
     try:
-        # 🛡️ 每次請求前加入微小的隨機延遲，避免過於頻繁觸發 Cloudflare 頻率限制
-        await asyncio.sleep(1.5)
-
-        async with session.get(target_url, headers=HEADERS, timeout=10, allow_redirects=False) as res:
-            # 如果不幸觸發 429，讓程序暫停更長時間並回傳 None
-            if res.status == 429:
-                print(f"⚠️ 觸發 Cloudflare 限流 (429 Too Many Requests)，暫停 30 秒...")
-                await asyncio.sleep(30)
-                return None
-
+        async with session.get(HOME_URL, headers=HEADERS, timeout=10) as res:
             if res.status == 200:
                 html = await res.text(encoding="utf-8")
                 soup = BeautifulSoup(html, "html.parser")
-                valid_url = fix_and_normalize_url(str(res.url))
-                title, pub_date = extract_news_detail_info(soup, html)
                 
-                # 🛡️ 嚴格過濾：若依然找不到有效標題，判定為不存在的文章
-                if title in ["無標題頁面", "官方頁面", ""]:
-                    return None
+                # 抓取首頁中所有包含新聞連結的標籤
+                # 包含大標題 (h2 a) 與下方列表 (ul li a)
+                links = soup.select("a[href*='/news/detail/']")
+                
+                seen_links = set()
+                for a in links:
+                    href = a.get("href", "")
+                    full_url = fix_and_normalize_url(BASE_URL + href if href.startswith("/") else href)
                     
-                return valid_url, title, pub_date
+                    if full_url in seen_links:
+                        continue
+                    seen_links.add(full_url)
+                    
+                    news_id = extract_id_from_url(full_url)
+                    if news_id == 0:
+                        continue
+                        
+                    # 嘗試抓取標題與日期
+                    title = a.get_text(strip=True)
+                    # 如果標題抓到的是日期格式或太短，試著找找看旁邊的 span
+                    parent = a.parent
+                    date_str = "日期未標明"
+                    
+                    # 尋找內部的 span.fl 或 span.fr
+                    fl = a.select_one(".fl")
+                    fr = a.select_one(".fr")
+                    if fl:
+                        title = fl.get_text(strip=True)
+                    if fr:
+                        date_str = fr.get_text(strip=True)
+                    
+                    # 如果標題依然包含太多空白或只是連結文字，做清理
+                    title = re.sub(r'\s+', ' ', title)
+                    if not title or len(title) < 2:
+                        continue
+
+                    news_items.append({
+                        "id": news_id,
+                        "url": full_url,
+                        "title": title,
+                        "date": date_str
+                    })
     except Exception as e:
-        # 可以印出錯誤以便除錯（例如連線逾時）
-        pass
-    return None
+        print(f"💥 爬取首頁發生錯誤: {e}")
+        
+    # 依照 ID 由小到大排序，確保舊的先發、新的後發
+    news_items.sort(key=lambda x: x["id"])
+    return news_items
 
 # ==========================================
-# 5. 初始化 Discord Bot & aiohttp Web Server
+# 5. 初始化 Discord Bot & Web Server
 # ==========================================
 intents = discord.Intents.default()
 intents.message_content = True
@@ -199,7 +186,6 @@ async def start_web_server():
     app = web.Application()
     app.router.add_get("/", handle_health_check)
     app.router.add_get("/health", handle_health_check)
-    
     port = int(os.getenv("PORT", "10000"))
     runner = web.AppRunner(app)
     await runner.setup()
@@ -208,65 +194,63 @@ async def start_web_server():
     print(f"🌐 保活 Web Server 已啟動，通訊埠: {port}")
 
 # ==========================================
-# 6. 定時輪詢任務 (Background Loop Task)
+# 6. 定時輪詢任務 (改為檢查首頁清單)
 # ==========================================
 @tasks.loop(minutes=CHECK_INTERVAL_MINUTES)
 async def auto_check_news():
-    global last_checked_id
+    global last_seen_id
     
     try:
         channel = bot.get_channel(TARGET_CHANNEL_ID)
         if not channel:
-            print(f"❌ 找不到目標頻道 ID: {TARGET_CHANNEL_ID}，請檢查環境變數 TARGET_CHANNEL_ID")
+            print(f"❌ 找不到目標頻道 ID: {TARGET_CHANNEL_ID}")
             return
 
-        max_failures = 5
-        consecutive_failures = 0
-        curr_id = last_checked_id
-        found_new_article = False
-
         async with aiohttp.ClientSession() as session:
-            while consecutive_failures < max_failures:
-                result = await fetch_and_parse_news(session, curr_id)
+            news_items = await fetch_home_news(session)
+            if not news_items:
+                print("🔍 目前無法從首頁取得公告清單")
+                return
 
-                if result:
-                    valid_url, title, pub_date = result
-                    consecutive_failures = 0
-                    found_new_article = True
+            new_articles_found = False
+            highest_id = last_seen_id
+
+            for item in news_items:
+                n_id = item["id"]
+                # 只要新聞 ID 大於我們上次紀錄的 ID，就是新文章！
+                if n_id > last_seen_id:
+                    new_articles_found = True
                     
                     embed = discord.Embed(
-                        title=f"📰 {title}",
-                        url=valid_url,
+                        title=f"📰 {item['title']}",
+                        url=item["url"],
                         color=discord.Color.blue()
                     )
-                    embed.add_field(name="發布日期", value=pub_date, inline=True)
-                    embed.add_field(name="新聞 ID", value=str(curr_id), inline=True)
+                    embed.add_field(name="發布日期", value=item["date"], inline=True)
+                    embed.add_field(name="新聞 ID", value=str(n_id), inline=True)
 
                     await channel.send(embed=embed)
-                    print(f"🎉 成功發送新聞推播！[ID: {curr_id}] [日期: {pub_date}] 標題: {title}")
+                    print(f"🎉 成功發送新公告！[ID: {n_id}] 標題: {item['title']}")
 
-                    last_checked_id = curr_id + 1
-                    save_last_id(last_checked_id)
-                else:
-                    consecutive_failures += 1
+                    if n_id > highest_id:
+                        highest_id = n_id
 
-                curr_id += 1
-
-        if not found_new_article:
-            print(f"🔍 檢查完成（目前最新探測進度 ID: {last_checked_id}），暫無新文章")
+            if new_articles_found:
+                last_seen_id = highest_id
+                save_last_seen_id(last_seen_id)
+            else:
+                print(f"🔍 檢查完成（目前紀錄最新 ID: {last_seen_id}），暫無新文章")
 
     except Exception as general_err:
-        print(f"💥 auto_check_news 發生非預期例外（已保護攔截）: {general_err}")
+        print(f"💥 auto_check_news 發生例外: {general_err}")
 
 # ==========================================
-# 7. Bot 事件處理與啟動 (Bot Lifecycle)
+# 7. Bot 啟動生命週期
 # ==========================================
 @bot.event
 async def on_ready():
     print(f"🤖 機器人已成功登入: {bot.user} (ID: {bot.user.id})")
-    
     bot.loop.create_task(start_web_server())
-
     if not auto_check_news.is_running():
         auto_check_news.start()
 
