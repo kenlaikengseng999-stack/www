@@ -12,7 +12,7 @@ from aiohttp import web
 from flask import Flask
 from threading import Thread
 
-# Flask 保活設定 (保留你原本的 Keep Alive)
+# Flask 保活設定
 app = Flask('')
 
 @app.route('/')
@@ -65,7 +65,7 @@ except Exception as e:
     print(f"❌ MongoDB 連線失敗，請檢查 MONGO_URI: {e}")
 
 # ==========================================
-# 3. 資料庫讀寫函式 (改為記錄已發送過的最高 News ID 或集合)
+# 3. 資料庫讀寫函式
 # ==========================================
 def load_last_seen_id() -> int:
     """從 MongoDB 讀取上次已發送的最高新聞 ID"""
@@ -76,7 +76,6 @@ def load_last_seen_id() -> int:
             return int(doc["val"])
     except Exception as e:
         print(f"⚠️ 讀取 MongoDB 發生異常: {e}")
-    # 預設從你之前卡住的 ID 開始防護
     return 3840
 
 def save_last_seen_id(news_id: int):
@@ -108,14 +107,12 @@ def fix_and_normalize_url(url):
     return urlunparse((parsed.scheme, parsed.netloc, clean_path, parsed.params, parsed.query, parsed.fragment))
 
 def extract_id_from_url(url):
-    """從新聞網址中萃取出數字 ID (例如 /news/detail/7710 -> 7710)"""
     match = re.search(r'/news/detail/(\d+)', url)
     if match:
         return int(match.group(1))
     return 0
 
 async def fetch_home_news(session: aiohttp.ClientSession):
-    """直接爬取首頁的公告清單，取得所有最新文章的標題、日期與連結"""
     news_items = []
     try:
         async with session.get(HOME_URL, headers=HEADERS, timeout=10) as res:
@@ -123,10 +120,7 @@ async def fetch_home_news(session: aiohttp.ClientSession):
                 html = await res.text(encoding="utf-8")
                 soup = BeautifulSoup(html, "html.parser")
                 
-                # 抓取首頁中所有包含新聞連結的標籤
-                # 包含大標題 (h2 a) 與下方列表 (ul li a)
                 links = soup.select("a[href*='/news/detail/']")
-                
                 seen_links = set()
                 for a in links:
                     href = a.get("href", "")
@@ -140,21 +134,13 @@ async def fetch_home_news(session: aiohttp.ClientSession):
                     if news_id == 0:
                         continue
                         
-                    # 嘗試抓取標題與日期
                     title = a.get_text(strip=True)
-                    # 如果標題抓到的是日期格式或太短，試著找找看旁邊的 span
-                    parent = a.parent
-                    date_str = "日期未標明"
-                    
-                    # 尋找內部的 span.fl 或 span.fr
                     fl = a.select_one(".fl")
                     fr = a.select_one(".fr")
                     if fl:
                         title = fl.get_text(strip=True)
-                    if fr:
-                        date_str = fr.get_text(strip=True)
+                    date_str = fr.get_text(strip=True) if fr else "日期未標明"
                     
-                    # 如果標題依然包含太多空白或只是連結文字，做清理
                     title = re.sub(r'\s+', ' ', title)
                     if not title or len(title) < 2:
                         continue
@@ -168,7 +154,6 @@ async def fetch_home_news(session: aiohttp.ClientSession):
     except Exception as e:
         print(f"💥 爬取首頁發生錯誤: {e}")
         
-    # 依照 ID 由小到大排序，確保舊的先發、新的後發
     news_items.sort(key=lambda x: x["id"])
     return news_items
 
@@ -194,8 +179,31 @@ async def start_web_server():
     print(f"🌐 保活 Web Server 已啟動，通訊埠: {port}")
 
 # ==========================================
-# 6. 定時輪詢任務 (改為檢查首頁清單)
+# 6. 測試指令與定時輪詢任務
 # ==========================================
+@bot.command(name="test_news")
+async def test_news(ctx):
+    """手動輸入 !test_news 可以立刻預覽最新抓到的公告格式"""
+    async with aiohttp.ClientSession() as session:
+        news_items = await fetch_home_news(session)
+        if not news_items:
+            await ctx.send("❌ 目前無法從首頁取得公告資料。")
+            return
+        
+        # 取清單中的最後一筆（通常是最新的一筆）來做範例預覽
+        latest = news_items[-1]
+        
+        embed = discord.Embed(
+            title=f"📰 [格式預覽] {latest['title']}",
+            url=latest["url"],
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="發布日期", value=latest["date"], inline=True)
+        embed.add_field(name="新聞 ID", value=str(latest["id"]), inline=True)
+
+        await ctx.send(embed=embed)
+        await ctx.send(f"💡 上次記錄的已發送 ID 為: `{last_seen_id}` (若想重設進度，可以調整 MongoDB)")
+
 @tasks.loop(minutes=CHECK_INTERVAL_MINUTES)
 async def auto_check_news():
     global last_seen_id
@@ -209,7 +217,6 @@ async def auto_check_news():
         async with aiohttp.ClientSession() as session:
             news_items = await fetch_home_news(session)
             if not news_items:
-                print("🔍 目前無法從首頁取得公告清單")
                 return
 
             new_articles_found = False
@@ -217,7 +224,6 @@ async def auto_check_news():
 
             for item in news_items:
                 n_id = item["id"]
-                # 只要新聞 ID 大於我們上次紀錄的 ID，就是新文章！
                 if n_id > last_seen_id:
                     new_articles_found = True
                     
@@ -238,8 +244,6 @@ async def auto_check_news():
             if new_articles_found:
                 last_seen_id = highest_id
                 save_last_seen_id(last_seen_id)
-            else:
-                print(f"🔍 檢查完成（目前紀錄最新 ID: {last_seen_id}），暫無新文章")
 
     except Exception as general_err:
         print(f"💥 auto_check_news 發生例外: {general_err}")
